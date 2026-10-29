@@ -13,6 +13,13 @@ let DB = store.get('nh.data', null);          // {customers, products, indiv, im
 let SET = store.get('nh.settings', { jodaiKeywords: ['Aコープ', 'ロッキー'] });
 if (!Array.isArray(SET.hidden)) SET.hidden = [];
 if (!SET.custProds || typeof SET.custProds !== 'object') SET.custProds = {};
+// 初期設定で「よく使う商品」に出さない商品（2026-10-29 指定の商品台帳でグレーの商品）。1回だけ追加する。
+const DEFAULT_HIDDEN = '10,1010,1011,1012,1013,1014,1016,1018,1020,1024,1028,1029,1030,1036,1037,1038,1040,1080,1090,1091,1092,1093,1094,1095,1096,1097,1098,1099,1106,1110,1115,1120,1121,1122,1125,1130,1131,1135,1211,1212,1221,1222,20,2013,21,22,30,4018,4030,4031,4040,4050,4060,8001,9010,9020,9040,9050'.split(',');
+if (SET.defaultHiddenApplied !== 1) {
+  SET.hidden = [...new Set([...SET.hidden, ...DEFAULT_HIDDEN])];
+  SET.defaultHiddenApplied = 1;
+  store.set('nh.settings', SET);
+}
 let SLIPS = store.get('nh.slips', []);        // saved delivery records
 let DRAFT = store.get('nh.draft', {});        // custCode -> {qty:{code:n}, jodai:bool}
 let UI = { area: store.get('nh.area', 'すべて'), q: '', sel: null, view: 'cust', mode: null, overlay: null, confirm: null, msg: null };
