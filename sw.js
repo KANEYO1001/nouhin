@@ -1,5 +1,5 @@
 // 納品価格帳 オフライン用。アプリを更新したら VERSION の数字を上げる。
-const VERSION = 'nouhin-v1';
+const VERSION = 'nouhin-v4';
 const ASSETS = ['./', './index.html', './app.js', './xlsx.full.min.js', './manifest.webmanifest', './icon-192.png', './icon-512.png'];
 self.addEventListener('install', e => { e.waitUntil(caches.open(VERSION).then(c => c.addAll(ASSETS)).then(() => self.skipWaiting())); });
 self.addEventListener('activate', e => {

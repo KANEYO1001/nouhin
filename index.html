@@ -126,6 +126,14 @@ tr.jd td{color:var(--accent)}
 .small{font-size:13px;color:var(--muted)}
 .rec{display:flex;justify-content:space-between;gap:12px;align-items:center;width:100%;text-align:left;border:1px solid var(--line);background:var(--surface);border-radius:10px;padding:12px 14px;min-height:60px}
 .rec .amt{font-size:20px;font-weight:700;font-variant-numeric:tabular-nums;white-space:nowrap}
+.btns.stick{position:sticky;bottom:-22px;background:var(--surface);padding:12px 0;border-top:1px solid var(--line)}
+.mini{display:inline-block;margin-top:4px;font-size:12px;border:1px solid var(--line);background:var(--surface);color:var(--muted);border-radius:6px;padding:3px 8px;min-height:30px}
+.mini.on{border-color:transparent;background:var(--ok);color:var(--okInk);min-height:0}
+.pick{display:flex;gap:12px;align-items:center;width:100%;text-align:left;border:0;border-top:1px solid var(--line);background:var(--surface);padding:10px 14px;min-height:54px;color:var(--muted)}
+.pick.on{color:var(--ink)}
+.pcat+.pick{border-top:0}
+.pick .box2{flex:none;width:28px;height:28px;border-radius:6px;border:2px solid var(--line);display:flex;align-items:center;justify-content:center;font-weight:700;color:var(--surface)}
+.pick.on .box2{background:var(--accent);border-color:var(--accent)}
 @media (max-width:900px){
   main{grid-template-columns:1fr}
   aside{border-right:0}

@@ -11,9 +11,11 @@ try { navigator.storage && navigator.storage.persist && navigator.storage.persis
 
 let DB = store.get('nh.data', null);          // {customers, products, indiv, importedAt, files}
 let SET = store.get('nh.settings', { jodaiKeywords: ['Aコープ', 'ロッキー'] });
+if (!Array.isArray(SET.hidden)) SET.hidden = [];
+if (!SET.custProds || typeof SET.custProds !== 'object') SET.custProds = {};
 let SLIPS = store.get('nh.slips', []);        // saved delivery records
 let DRAFT = store.get('nh.draft', {});        // custCode -> {qty:{code:n}, jodai:bool}
-let UI = { area: store.get('nh.area', 'すべて'), q: '', sel: null, view: 'cust', showAll: false, overlay: null, confirm: null, msg: null };
+let UI = { area: store.get('nh.area', 'すべて'), q: '', sel: null, view: 'cust', mode: null, overlay: null, confirm: null, msg: null };
 
 const TIER_IDX = { '上代': 0, '売上単価１': 1, '売上単価２': 2, '売上単価３': 3, '売上単価４': 4, '売上単価1': 1, '売上単価2': 2, '売上単価3': 3, '売上単価4': 4 };
 const TIER_LABEL = ['上代（小売）', '単価１（一般）', '単価２（カナカン等）', '単価３（ロッキー等）', '単価４（道の駅）'];
@@ -212,6 +214,17 @@ function groupOf(p) {
   return ({ '1': [1, '醤油'], '2': [2, '味醤油'], '3': [3, '酢'], '4': [4, 'みりん・その他'], '5': [5, '味噌'], '8': [7, 'ギフト・セット'], '9': [8, '送料・資材'] })[d] || [8, 'その他'];
 }
 
+/* ---------- 表示する商品 ---------- */
+function usualCodes(c) {
+  if (Array.isArray(SET.custProds[c.code])) return new Set(SET.custProds[c.code]);
+  const set = new Set();
+  SLIPS.forEach(r => { if (r.custCode === c.code) r.slip.lines.forEach(l => set.add(l.code)); });
+  Object.keys((DB.indiv[c.code] || {})).forEach(k => set.add(k));
+  return set;
+}
+const isHidden = code => SET.hidden.includes(code);
+function setCustProds(code, set) { SET.custProds[code] = [...set]; store.set('nh.settings', SET); }
+
 /* ---------- 詳細 ---------- */
 function renderDetail() {
   const el = $('#detail');
@@ -237,28 +250,32 @@ function renderDetail() {
       return `<div class="it"><span>${esc(p ? p.name : '商品コード ' + k)}</span><span class="pr">${yen(indiv[k].price)}<small style="font-size:13px;font-weight:400">円</small></span></div>`;
     }).join('') + `</div>`;
   }
+  const usual = usualCodes(c);
+  const mode = UI.mode || (usual.size ? 'usual' : 'main');
   h += `<div class="tools">
     <div class="seg" role="group" aria-label="表示する商品">
-      <button data-act="filter" data-v="0" aria-pressed="${!UI.showAll}">この店の価格がある商品</button>
-      <button data-act="filter" data-v="1" aria-pressed="${UI.showAll}">すべての商品</button>
+      <button data-act="filter" data-v="usual" aria-pressed="${mode === 'usual'}">この店の商品（${usual.size}）</button>
+      <button data-act="filter" data-v="main" aria-pressed="${mode === 'main'}">よく使う商品</button>
+      <button data-act="filter" data-v="all" aria-pressed="${mode === 'all'}">すべての商品</button>
+      <button data-act="pickcust">この店の商品を選ぶ</button>
     </div>
     <button class="tgl" data-act="jodai" aria-pressed="${d.jodai}">上代（小売）も計算 ${d.jodai ? 'ON' : 'OFF'}</button>
   </div>`;
   const prods = DB.products.filter(p => p.show).map(p => ({ p, pr: priceFor(c, p), g: groupOf(p) }))
-    .filter(x => UI.showAll || x.pr || d.qty[x.p.code])
+    .filter(x => (mode === 'all') || (mode === 'usual' ? usual.has(x.p.code) : (x.pr && !isHidden(x.p.code))) || d.qty[x.p.code])
     .sort((a, b) => a.g[0] - b.g[0] || Number(a.p.code) - Number(b.p.code));
   let rows = '', cat = null;
   for (const x of prods) {
     if (x.g[1] !== cat) { cat = x.g[1]; rows += `<div class="pcat">${esc(cat)}</div>`; }
     const q = d.qty[x.p.code] || '';
     rows += `<div class="prow ${q ? 'has' : ''}" data-p="${esc(x.p.code)}">
-      <div class="pn"><span class="k">${esc(x.p.name)}</span><span class="s">${esc(x.p.code)}${x.p.unit ? '・' + esc(x.p.unit) : ''}${x.p.irisu ? '・入数' + x.p.irisu : ''}</span></div>
+      <div class="pn"><span class="k">${esc(x.p.name)}</span><span class="s">${esc(x.p.code)}${x.p.unit ? '・' + esc(x.p.unit) : ''}${x.p.irisu ? '・入数' + x.p.irisu : ''}</span>${mode === 'usual' ? `<button class="mini" data-act="rmcust">この店から外す</button>` : (usual.has(x.p.code) ? `<span class="mini on">この店の商品</span>` : `<button class="mini" data-act="addcust">＋この店に追加</button>`)}</div>
       <div class="pp">${x.pr ? `<span class="v">${x.pr.indiv ? '<span class="ind">個別</span>' : ''}${yen(x.pr.v)}</span>` : '<span class="v na">価格なし</span>'}
         ${d.jodai ? `<span class="j">上代 ${x.p.p[0] ? yen(x.p.p[0]) : '－'}</span>` : ''}</div>
       <div class="step"><button data-act="dec" aria-label="1つ減らす">−</button><input type="number" inputmode="numeric" min="0" value="${q}" placeholder="0" aria-label="${esc(x.p.name)} の数量" data-act="qty"><button class="plus" data-act="inc" aria-label="1つ増やす">＋</button></div>
     </div>`;
   }
-  h += `<div class="plist">${rows || '<div class="empty">この店に設定された価格がありません。「すべての商品」を押してください。</div>'}</div>
+  h += `<div class="plist">${rows || '<div class="empty">表示する商品がありません。「すべての商品」を押してください。</div>'}</div>
     <p class="small">価格はすべて税抜。弥生販売の単価種類${c.rate !== 100 ? '・掛率' : ''}と個別価格表から計算しています。</p></div>`;
   const s = buildSlip(c, d);
   h += `<div class="slipbar"><div class="sum">
@@ -301,16 +318,34 @@ function overlayHTML() {
       <div class="btns"><button class="btn dan" data-act="del">削除</button><button class="btn" data-act="close">閉じる</button></div>
     </div></div>`;
   }
+  if (o.type === 'pick') {
+    let rows = '', cat = null;
+    const prods = DB.products.filter(p => p.show).map(p => ({ p, g: groupOf(p) })).sort((a, b) => a.g[0] - b.g[0] || Number(a.p.code) - Number(b.p.code));
+    for (const x of prods) {
+      if (x.g[1] !== cat) { cat = x.g[1]; rows += `<div class="pcat">${esc(cat)}</div>`; }
+      const on = o.checked.has(x.p.code);
+      rows += `<button class="pick ${on ? 'on' : ''}" data-act="togp" data-code="${esc(x.p.code)}" aria-pressed="${on}"><span class="box2">${on ? '✓' : ''}</span><span class="pn"><span class="k">${esc(x.p.name)}</span><span class="s">${esc(x.p.code)}</span></span></button>`;
+    }
+    const n = prods.filter(x => o.checked.has(x.p.code)).length;
+    const oc = o.cust ? custByCode(o.cust) : null;
+    return `<div class="overlay" data-act="close"><div class="sheet" role="dialog" aria-modal="true" aria-label="商品を選ぶ">
+      <h2>${oc ? esc(oc.name) + ' の商品を選ぶ' : 'よく使う商品を選ぶ（全店共通）'}</h2>
+      <div class="small">${oc ? 'チェックした商品だけが「この店の商品」に出ます。この店にだけ反映されます。' : 'チェックを外した商品は「よく使う商品」に出なくなります。どの得意先でも共通の設定です。'}「すべての商品」を押せば、いつでも全部表示できます。</div>
+      <div class="btns" style="justify-content:flex-start"><button class="btn" data-act="pickall">すべてチェック</button><button class="btn" data-act="picknone">すべて外す</button><span class="small" style="align-self:center">表示 ${n} / ${prods.length} 商品</span></div>
+      <div class="plist">${rows}</div>
+      <div class="btns stick"><button class="btn" data-act="close">やめる</button><button class="btn pri" data-act="savepick">保存</button></div>
+    </div></div>`;
+  }
   if (o.type === 'data') {
     return `<div class="overlay" data-act="close"><div class="sheet" role="dialog" aria-modal="true" aria-label="データ更新">
       <h2>データ更新</h2>
       ${UI.msg ? `<div class="msg ${UI.msg.err ? 'err' : ''}">${esc(UI.msg.text)}</div>` : ''}
       ${dataSummaryHTML()}
       <div class="small">弥生販売から書き出した「得意先台帳」「商品台帳」と「個別価格の得意先一覧」のExcelを選んでください。まとめて選んでも、1つずつでもかまいません。選んだファイルの分だけ置き換わります。</div>
-      <label class="filebtn">ファイルを選んで読み込む<input type="file" id="files" multiple accept=".xlsx,.xls,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel"></label>
+      <label class="filebtn">ファイルを選んで読み込む<input type="file" id="files" multiple></label>
       <div class="field"><label for="kw"><b>上代（小売）も計算する得意先</b>（名前に含まれる言葉。読点で区切る）</label>
         <input id="kw" value="${esc((SET.jodaiKeywords || []).join('、'))}"></div>
-      <div class="btns"><button class="btn" data-act="close">閉じる</button><button class="btn pri" data-act="savekw">設定を保存</button></div>
+      <div class="btns"><button class="btn" data-act="pickprods">よく使う商品を選ぶ</button><button class="btn" data-act="close">閉じる</button><button class="btn pri" data-act="savekw">設定を保存</button></div>
     </div></div>`;
   }
   return '';
@@ -362,7 +397,7 @@ function setQty(code, v) {
 $('#chips').addEventListener('click', e => { const b = e.target.closest('.chip'); if (!b) return; UI.area = b.dataset.a; store.set('nh.area', UI.area); renderChips(); renderList(); });
 $('#list').addEventListener('click', e => {
   const b = e.target.closest('.row'); if (!b) return;
-  UI.sel = b.dataset.c; UI.view = 'cust'; UI.showAll = false;
+  UI.sel = b.dataset.c; UI.view = 'cust'; UI.mode = null;
   document.body.classList.add('show-detail'); render(); $('#detail').scrollTop = 0;
 });
 $('#detail').addEventListener('click', e => {
@@ -370,9 +405,15 @@ $('#detail').addEventListener('click', e => {
   if (t.dataset.rec) { UI.overlay = { type: 'rec', id: t.dataset.rec }; UI.confirm = null; render(); return; }
   const a = t.dataset.act; const row = t.closest('.prow');
   if (a === 'back') { document.body.classList.remove('show-detail'); if (UI.view === 'rec') UI.view = 'cust'; render(); }
-  else if (a === 'filter') { UI.showAll = t.dataset.v === '1'; renderDetail(); }
+  else if (a === 'filter') { UI.mode = t.dataset.v; renderDetail(); }
+  else if (a === 'pickprods') { openPick(); }
   else if (a === 'jodai') { const c = custByCode(UI.sel); const d = draftOf(c); d.jodai = !d.jodai; saveDraft(); renderDetail(); }
   else if (a === 'inc' || a === 'dec') { const c = custByCode(UI.sel); const cur = draftOf(c).qty[row.dataset.p] || 0; setQty(row.dataset.p, cur + (a === 'inc' ? 1 : -1)); }
+  else if (a === 'rmcust' || a === 'addcust') {
+    const c = custByCode(UI.sel); const set = usualCodes(c); const k = row.dataset.p;
+    a === 'rmcust' ? set.delete(k) : set.add(k); setCustProds(c.code, set); renderDetail();
+  }
+  else if (a === 'pickcust') { openPick(UI.sel); }
   else if (a === 'slip') { UI.overlay = { type: 'slip' }; UI.confirm = null; render(); }
   else if (a === 'data') { openData(); }
 });
@@ -392,6 +433,16 @@ $('#ov').addEventListener('click', async e => {
   }
   else if (a === 'del') { UI.confirm = 'del'; $('#ov').innerHTML = overlayHTML(); }
   else if (a === 'dodel') { SLIPS = SLIPS.filter(x => x.id !== UI.overlay.id); store.set('nh.slips', SLIPS); UI.overlay = null; UI.confirm = null; render(); }
+  else if (a === 'pickprods') { openPick(); }
+  else if (a === 'togp') { const h = UI.overlay.checked, k = t.dataset.code; h.has(k) ? h.delete(k) : h.add(k); const sc = $('#ov .overlay').scrollTop; $('#ov').innerHTML = overlayHTML(); $('#ov .overlay').scrollTop = sc; }
+  else if (a === 'pickall') { DB.products.forEach(p => UI.overlay.checked.add(p.code)); $('#ov').innerHTML = overlayHTML(); }
+  else if (a === 'picknone') { UI.overlay.checked.clear(); $('#ov').innerHTML = overlayHTML(); }
+  else if (a === 'savepick') {
+    const o = UI.overlay;
+    if (o.cust) { setCustProds(o.cust, o.checked); UI.mode = 'usual'; }
+    else { SET.hidden = DB.products.map(p => p.code).filter(k => !o.checked.has(k)); store.set('nh.settings', SET); }
+    UI.overlay = null; render();
+  }
   else if (a === 'savekw') {
     SET.jodaiKeywords = $('#kw').value.split(/[、,，\s]+/).map(s => s.trim()).filter(Boolean);
     store.set('nh.settings', SET); UI.msg = { text: '設定を保存しました。新しく開いた得意先から反映されます。' }; render();
@@ -409,6 +460,11 @@ $('#ov').addEventListener('change', async e => {
   } catch (err) { UI.msg = { err: true, text: err.message || String(err) }; }
   render();
 });
+function openPick(cust) {
+  if (!DB) return;
+  const checked = cust ? usualCodes(custByCode(cust)) : new Set(DB.products.map(p => p.code).filter(k => !isHidden(k)));
+  UI.overlay = { type: 'pick', cust: cust || null, checked }; UI.confirm = null; render();
+}
 function openData() { UI.overlay = { type: 'data' }; UI.msg = null; render(); }
 $('#dataBtn').addEventListener('click', openData);
 $('#recBtn').addEventListener('click', () => { UI.view = UI.view === 'rec' ? 'cust' : 'rec'; if (UI.view === 'rec') document.body.classList.add('show-detail'); render(); $('#detail').scrollTop = 0; });
