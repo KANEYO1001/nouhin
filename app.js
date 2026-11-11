@@ -21,6 +21,7 @@ if ((SET.defaultHiddenApplied || 0) < 2) {
   SET.defaultHiddenApplied = 2;
   store.set('nh.settings', SET);
 }
+let TEMP = store.get('nh.temp', {});           // 仮の価格 custCode -> {prodCode: {price, at}}
 let SLIPS = store.get('nh.slips', []);        // saved delivery records
 let DRAFT = store.get('nh.draft', {});        // custCode -> {qty:{code:n}, jodai:bool}
 let UI = { area: store.get('nh.area', 'すべて'), q: '', sel: null, view: 'cust', mode: null, overlay: null, confirm: null, msg: null };
@@ -137,8 +138,8 @@ async function importFiles(files) {
       const rows = rowsOf(wb.Sheets[sn]);
       if (findHeader(rows, '販売価格') >= 0 && findHeader(rows, '商品コード') >= 0) { const pl = parsePriceList(rows); found.plist = found.plist || { map: {}, count: 0, custs: [] }; Object.assign(found.plist.map, pl.map); found.plist.count += pl.count; found.plist.custs.push(...pl.custs); used = true; }
       else if (findHeader(rows, '得意先コード') >= 0 && !found.indiv) { found.indiv = parseIndiv(rows); used = true; }
-      else if (findHeader(rows, '単価種類') >= 0 && findHeader(rows, '取引区分') >= 0 && !found.customers) { found.customers = parseCustomers(rows); used = true; }
-      else if (findHeader(rows, '税抜上代') >= 0 && !found.products) { found.products = parseProducts(rows); used = true; }
+      else if (findHeader(rows, '単価種類') >= 0 && findHeader(rows, '取引区分') >= 0) { found.customers = (found.customers || []).concat(parseCustomers(rows)); used = true; }
+      else if (findHeader(rows, '税抜上代') >= 0) { found.products = (found.products || []).concat(parseProducts(rows)); used = true; }
     }
     names.push(f.name + (used ? '' : '（読めませんでした）'));
   }
@@ -169,7 +170,30 @@ function basePrice(c, p) {
   if (c.rate && c.rate !== 100) v = roundBy(v * c.rate / 100, c.amtRound);
   return v;
 }
+function yayoiPrice(c, p) {
+  const k = DB.indiv[c.code] && DB.indiv[c.code][p.code];
+  if (k) return { v: k.price, indiv: true };
+  const v = basePrice(c, p);
+  return v == null ? null : { v, indiv: false };
+}
+function tempOf(c, p) { return TEMP[c.code] && TEMP[c.code][p.code]; }
+function saveTemp() { for (const k in TEMP) if (!Object.keys(TEMP[k]).length) delete TEMP[k]; store.set('nh.temp', TEMP); }
+function tempCount() { return Object.values(TEMP).reduce((a, m) => a + Object.keys(m).length, 0); }
+// 弥生のデータを読み込んだあと、弥生の価格が仮の価格と同じになったものは「反映済み」として消す
+function settleTemp() {
+  let done = 0;
+  for (const cc in TEMP) {
+    const c = custByCode(cc);
+    for (const pc in TEMP[cc]) {
+      const p = prodByCode(pc); const y = c && p ? yayoiPrice(c, p) : null;
+      if (y && y.v === TEMP[cc][pc].price) { delete TEMP[cc][pc]; done++; }
+    }
+  }
+  saveTemp(); return done;
+}
 function priceFor(c, p) {
+  const t = tempOf(c, p);
+  if (t) return { v: t.price, temp: true, indiv: false };
   const k = DB.indiv[c.code] && DB.indiv[c.code][p.code];
   if (k) return { v: k.price, indiv: true, note: k.note };
   const v = basePrice(c, p);
@@ -190,7 +214,7 @@ function buildSlip(c, d) {
     const unit = pr ? pr.v : 0;
     const jodai = p.p[0] || 0;
     lines.push({ code: p.code, name: p.name, unitLabel: p.unit, qty: q, price: unit, amount: roundBy(unit * q, c.amtRound),
-      indiv: pr ? pr.indiv : false, jprice: jodai, jamount: jodai * q, taxRate: p.taxRate, noPrice: !pr });
+      indiv: pr ? pr.indiv : false, temp: pr ? !!pr.temp : false, jprice: jodai, jamount: jodai * q, taxRate: p.taxRate, noPrice: !pr });
   }
   const sub = lines.reduce((a, l) => a + l.amount, 0);
   const byRate = {};
@@ -232,6 +256,7 @@ function renderList() {
       <div class="grow"><div class="nm">${esc(c.name)}</div><div class="sub">${esc(c.code)}${c.addr ? '　' + esc(c.addr.replace(/^石川県/, '')) : ''}</div></div>
       ${dr ? '<span class="tag draft">入力中</span>' : ''}
       ${c.deal.includes('現金') ? '<span class="tag cash">現金</span>' : ''}
+      ${TEMP[c.code] ? '<span class="tag tmp">仮</span>' : ''}
       ${hasInd ? '<span class="tag gold">個別</span>' : ''}
       <span class="tag ${ti === 1 && c.rate === 100 ? '' : 'acc'}">${esc(['上代', '単価1', '単価2', '単価3', '単価4'][ti])}${c.rate !== 100 ? ' ' + c.rate + '%' : ''}</span></button>`;
   }
@@ -277,12 +302,22 @@ function renderDetail() {
       ${c.addr || c.tel ? `<div class="info" style="margin-top:6px">${esc(c.addr)}${c.tel ? '　TEL ' + esc(c.tel) : ''}</div>` : ''}
     </div>`;
   if (c.memo) h += `<div class="note">${esc(c.memo)}</div>`;
+  const tmp = TEMP[c.code] || {};
+  if (Object.keys(tmp).length) {
+    h += `<div class="box tmpbox"><h2>仮の価格（弥生販売にまだ入れていない価格・税抜）</h2>` + Object.keys(tmp).map(k => {
+      const p = prodByCode(k); const y = p ? yayoiPrice(c, p) : null;
+      return `<div class="it"><span>${esc(p ? p.name : '商品コード ' + k)}<br><small>弥生 ${y ? yen(y.v) + '円' : 'なし'} → ${new Date(tmp[k].at).toLocaleDateString('ja-JP')} 変更</small></span><span class="pr">${yen(tmp[k].price)}<small style="font-size:13px;font-weight:400">円</small></span></div>`;
+    }).join('') + `</div>`;
+  }
   const indKeys = Object.keys(indiv).filter(k => { const p = prodByCode(k); return !p || p.show; });
   if (indKeys.length) {
-    h += `<div class="box"><h2>この店だけの価格（税抜）</h2>` + indKeys.map(k => {
-      const p = prodByCode(k);
-      return `<div class="it"><span>${esc(p ? p.name : '商品コード ' + k)}</span><span class="pr">${yen(indiv[k].price)}<small style="font-size:13px;font-weight:400">円</small></span></div>`;
-    }).join('') + `</div>`;
+    // 個別価格は商品の一覧にも「個別」の印で出るので、上の欄はたたんでおき、押すと開く
+    const open = UI.indOpen === c.code;
+    h += `<div class="box indbox"><button class="indhead" data-act="indtoggle" aria-expanded="${open}"><span><b>この店だけの価格</b>　${indKeys.length}商品（下の一覧に「個別」の印）</span><span class="small">${open ? '閉じる ▲' : '一覧を見る ▼'}</span></button>` +
+      (open ? indKeys.map(k => {
+        const p = prodByCode(k);
+        return `<div class="it"><span>${esc(p ? p.name : '商品コード ' + k)}</span><span class="pr">${yen(indiv[k].price)}<small style="font-size:13px;font-weight:400">円</small></span></div>`;
+      }).join('') : '') + `</div>`;
   }
   const usual = usualCodes(c);
   const mode = UI.mode || (usual.size ? 'usual' : 'main');
@@ -304,13 +339,13 @@ function renderDetail() {
     const q = d.qty[x.p.code] || '';
     rows += `<div class="prow ${q ? 'has' : ''}" data-p="${esc(x.p.code)}">
       <div class="pn"><span class="k">${esc(x.p.name)}</span><span class="s">${esc(x.p.code)}${x.p.unit ? '・' + esc(x.p.unit) : ''}${x.p.irisu ? '・入数' + x.p.irisu : ''}</span>${mode === 'usual' ? `<button class="mini" data-act="rmcust">この店から外す</button>` : (usual.has(x.p.code) ? `<span class="mini on">この店の商品</span>` : `<button class="mini" data-act="addcust">＋この店に追加</button>`)}</div>
-      <div class="pp">${x.pr ? `<span class="v">${x.pr.indiv ? '<span class="ind">個別</span>' : ''}${yen(x.pr.v)}</span>` : '<span class="v na">価格なし</span>'}
-        ${d.jodai ? `<span class="j">上代 ${x.p.p[0] ? yen(x.p.p[0]) : '－'}</span>` : ''}</div>
+      <button class="pp" data-act="editprice" aria-label="${esc(x.p.name)} の価格を変更">${x.pr ? `<span class="v">${x.pr.temp ? '<span class="ind tmp">仮</span>' : (x.pr.indiv ? '<span class="ind">個別</span>' : '')}${yen(x.pr.v)}</span>` : '<span class="v na">価格なし</span>'}
+        ${d.jodai ? `<span class="j">上代 ${x.p.p[0] ? yen(x.p.p[0]) : '－'}</span>` : ''}</button>
       <div class="step"><button data-act="dec" aria-label="1つ減らす">−</button><input type="number" inputmode="numeric" min="0" value="${q}" placeholder="0" aria-label="${esc(x.p.name)} の数量" data-act="qty"><button class="plus" data-act="inc" aria-label="1つ増やす">＋</button></div>
     </div>`;
   }
   h += `<div class="plist">${rows || '<div class="empty">表示する商品がありません。「すべての商品」を押してください。</div>'}</div>
-    <p class="small">価格はすべて税抜。弥生販売の単価種類${c.rate !== 100 ? '・掛率' : ''}と個別価格表から計算しています。</p></div>`;
+    <p class="small">価格の数字を押すと、その店の仮の価格に変えられます。価格はすべて税抜。弥生販売の単価種類${c.rate !== 100 ? '・掛率' : ''}と個別価格表から計算しています。</p></div>`;
   const s = buildSlip(c, d);
   h += `<div class="slipbar"><div class="sum">
       <span><b>${s.lines.length}</b> 品・計 <b>${s.count}</b> 点</span>
@@ -323,7 +358,7 @@ function renderDetail() {
 function slipTableHTML(s) {
   const j = s.jodai;
   return `<div class="tblwrap"><table><thead><tr><th>商品</th><th class="n">数量</th><th class="n">単価</th><th class="n">金額</th>${j ? '<th class="n">上代</th><th class="n">上代金額</th>' : ''}</tr></thead><tbody>
-    ${s.lines.map(l => `<tr><td class="nm">${esc(l.name)}${l.indiv ? ' <span class="tag gold">個別</span>' : ''}${l.noPrice ? ' <span class="tag cash">価格なし</span>' : ''}</td><td class="n">${l.qty}${esc(l.unitLabel)}</td><td class="n">${yen(l.price)}</td><td class="n">${yen(l.amount)}</td>${j ? `<td class="n">${l.jprice ? yen(l.jprice) : '－'}</td><td class="n">${l.jprice ? yen(l.jamount) : '－'}</td>` : ''}</tr>`).join('')}
+    ${s.lines.map(l => `<tr><td class="nm">${esc(l.name)}${l.temp ? ' <span class="tag tmp">仮</span>' : (l.indiv ? ' <span class="tag gold">個別</span>' : '')}${l.noPrice ? ' <span class="tag cash">価格なし</span>' : ''}</td><td class="n">${l.qty}${esc(l.unitLabel)}</td><td class="n">${yen(l.price)}</td><td class="n">${yen(l.amount)}</td>${j ? `<td class="n">${l.jprice ? yen(l.jprice) : '－'}</td><td class="n">${l.jprice ? yen(l.jamount) : '－'}</td>` : ''}</tr>`).join('')}
   </tbody><tfoot>
     <tr><td>合計（税抜）</td><td class="n">${s.count}</td><td></td><td class="n">${yen(s.sub)}</td>${j ? `<td></td><td class="n">${yen(s.jsub)}</td>` : ''}</tr>
     ${s.taxes.map(t => `<tr><td colspan="3" class="small">消費税 ${t.rate}%（対象 ${yen(t.base)}円・参考）</td><td class="n">${yen(t.tax)}</td>${j ? '<td></td><td></td>' : ''}</tr>`).join('')}
@@ -370,6 +405,18 @@ function overlayHTML() {
       <div class="btns stick"><button class="btn" data-act="close">やめる</button><button class="btn pri" data-act="savepick">保存</button></div>
     </div></div>`;
   }
+  if (o.type === 'price') {
+    const c = custByCode(UI.sel); const p = prodByCode(o.p); const y = yayoiPrice(c, p); const t = tempOf(c, p);
+    return `<div class="overlay" data-act="close"><div class="sheet" role="dialog" aria-modal="true" aria-label="仮の価格">
+      <h2>仮の価格を入れる</h2>
+      <div><b>${esc(c.name)}</b>　${esc(p.name)}</div>
+      <div class="stat"><div><span class="small">弥生販売の価格${y && y.indiv ? '（個別）' : ''}</span><b>${y ? yen(y.v) + '円' : 'なし'}</b></div>${t ? `<div><span class="small">今の仮の価格</span><b>${yen(t.price)}円</b></div>` : ''}</div>
+      ${UI.msg ? `<div class="msg err">${esc(UI.msg.text)}</div>` : ''}
+      <div class="field"><label for="tp"><b>新しい価格（税抜・円）</b></label><input id="tp" type="number" inputmode="numeric" min="0" step="1" value="${t ? t.price : (y ? y.v : '')}"></div>
+      <div class="small">この店のこの商品だけ、この価格で計算します。このタブレットにだけ保存されます。会社で弥生販売も直して読み込み直すと、仮の価格は自動で消えます。</div>
+      <div class="btns">${t ? '<button class="btn dan" data-act="deltemp">仮の価格を消す</button>' : ''}<button class="btn" data-act="close">やめる</button><button class="btn pri" data-act="savetemp">保存</button></div>
+    </div></div>`;
+  }
   if (o.type === 'data') {
     return `<div class="overlay" data-act="close"><div class="sheet" role="dialog" aria-modal="true" aria-label="データ更新">
       <h2>データ更新</h2>
@@ -377,6 +424,9 @@ function overlayHTML() {
       ${dataSummaryHTML()}
       <div class="small">弥生販売から書き出した「得意先台帳」「商品台帳」と「個別価格の得意先一覧」のExcelを選んでください。まとめて選んでも、1つずつでもかまいません。選んだファイルの分だけ置き換わります。</div>
       <label class="filebtn">ファイルを選んで読み込む<input type="file" id="files" multiple></label>
+      <div class="tmpline"><div><b>仮の価格 ${tempCount()}件</b><br><span class="small">配達先で変えた価格です。一覧を書き出して、弥生販売に入れてください。</span></div>
+        <span class="btns">${tempCount() ? '<button class="btn" data-act="exporttemp">一覧をExcelで書き出す</button><button class="btn dan" data-act="cleartemp">すべて消す</button>' : ''}</span></div>
+      ${UI.confirm === 'cleartemp' ? '<div class="confirm">仮の価格をすべて消しますか？弥生販売の価格に戻ります。<span class="btns"><button class="btn" data-act="cancelc">やめる</button><button class="btn dan" data-act="docleartemp">消す</button></span></div>' : ''}
       <div class="field"><label for="kw"><b>上代（小売）も計算する得意先</b>（名前に含まれる言葉。読点で区切る）</label>
         <input id="kw" value="${esc((SET.jodaiKeywords || []).join('、'))}"></div>
       <div class="btns"><button class="btn" data-act="pickprods">よく使う商品を選ぶ</button><button class="btn" data-act="close">閉じる</button><button class="btn pri" data-act="savekw">設定を保存</button></div>
@@ -448,6 +498,8 @@ $('#detail').addEventListener('click', e => {
     a === 'rmcust' ? set.delete(k) : set.add(k); setCustProds(c.code, set); renderDetail();
   }
   else if (a === 'pickcust') { openPick(UI.sel); }
+  else if (a === 'indtoggle') { UI.indOpen = UI.indOpen === UI.sel ? null : UI.sel; renderDetail(); }
+  else if (a === 'editprice') { UI.overlay = { type: 'price', p: row.dataset.p }; UI.confirm = null; UI.msg = null; render(); setTimeout(() => { const i = $('#tp'); if (i) { i.focus(); i.select(); } }, 50); }
   else if (a === 'slip') { UI.overlay = { type: 'slip' }; UI.confirm = null; render(); }
   else if (a === 'data') { openData(); }
 });
@@ -477,6 +529,30 @@ $('#ov').addEventListener('click', async e => {
     else { SET.hidden = DB.products.map(p => p.code).filter(k => !o.checked.has(k)); store.set('nh.settings', SET); }
     UI.overlay = null; render();
   }
+  else if (a === 'savetemp' || a === 'deltemp') {
+    const c = custByCode(UI.sel); const code = UI.overlay.p;
+    if (a === 'savetemp') {
+      const raw = $('#tp').value.trim(); const v = Number(raw);
+      if (raw === '' || !isFinite(v) || v < 0) { UI.msg = { err: true, text: '価格を数字で入れてください（例：590）。' }; $('#ov').innerHTML = overlayHTML(); return; }
+      const y = yayoiPrice(c, prodByCode(code));
+      if (y && y.v === Math.round(v)) { if (TEMP[c.code]) delete TEMP[c.code][code]; }
+      else { (TEMP[c.code] = TEMP[c.code] || {})[code] = { price: Math.round(v), at: new Date().toISOString() }; }
+    } else if (TEMP[c.code]) delete TEMP[c.code][code];
+    saveTemp(); UI.overlay = null; UI.msg = null; render();
+  }
+  else if (a === 'exporttemp') {
+    const rows = [['得意先コード', '得意先名', '商品コード', '商品名', '弥生販売の価格（税抜）', '仮の価格（税抜）', '変更日']];
+    for (const cc in TEMP) { const c = custByCode(cc); for (const pc in TEMP[cc]) { const p = prodByCode(pc); const y = c && p ? yayoiPrice(c, p) : null;
+      rows.push([cc, c ? c.name : '', pc, p ? p.name : '', y ? y.v : '', TEMP[cc][pc].price, new Date(TEMP[cc][pc].at).toLocaleDateString('ja-JP')]); } }
+    const ws = XLSX.utils.aoa_to_sheet(rows); ws['!cols'] = [{ wch: 12 }, { wch: 30 }, { wch: 10 }, { wch: 30 }, { wch: 18 }, { wch: 16 }, { wch: 12 }];
+    const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, ws, '仮の価格');
+    const d = new Date(); const name = `仮の価格_${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}.xlsx`;
+    const blob = new Blob([XLSX.write(wb, { bookType: 'xlsx', type: 'array' })], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+    const url = URL.createObjectURL(blob); const link = document.createElement('a'); link.href = url; link.download = name;
+    document.body.appendChild(link); link.click(); link.remove(); setTimeout(() => URL.revokeObjectURL(url), 5000);
+  }
+  else if (a === 'cleartemp') { UI.confirm = 'cleartemp'; $('#ov').innerHTML = overlayHTML(); }
+  else if (a === 'docleartemp') { TEMP = {}; saveTemp(); UI.confirm = null; UI.msg = { text: '仮の価格をすべて消しました。' }; render(); }
   else if (a === 'savekw') {
     SET.jodaiKeywords = $('#kw').value.split(/[、,，\s]+/).map(s => s.trim()).filter(Boolean);
     store.set('nh.settings', SET); UI.msg = { text: '設定を保存しました。新しく開いた得意先から反映されます。' }; render();
@@ -491,6 +567,9 @@ $('#ov').addEventListener('change', async e => {
     if (f.products) parts.push(`商品 ${f.products.length}件を更新`);
     if (f.indiv) parts.push(`個別価格 ${f.indiv.count}件`);
     if (f.plist) parts.push(`弥生の商品価格表 ${f.plist.custs.map(k => (custByCode(k) || { name: '得意先 ' + k }).name).join('・')}（${f.plist.count}件）`);
+    const done = settleTemp(); const left = tempCount();
+    if (done) parts.push(`弥生に反映済みの仮の価格 ${done}件を消去`);
+    if (left) parts.push(`まだ弥生と違う仮の価格が ${left}件 あります`);
     UI.msg = { text: '読み込みました：' + parts.join('、') };
   } catch (err) { UI.msg = { err: true, text: err.message || String(err) }; }
   render();
