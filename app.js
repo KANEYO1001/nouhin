@@ -107,6 +107,26 @@ function parseIndiv(rows) {
   return { map: out, count: n };
 }
 
+// 弥生販売「商品価格表（得意先別）」価格表形式：得意先ごとの単価（税抜）。0は未設定。
+function parsePriceList(rows) {
+  const out = {}; let cust = null, cCode = -1, cTanka = -1, n = 0;
+  for (const r of rows) {
+    if (!r) continue;
+    const cells = r.map(v => String(v ?? '').trim());
+    if (cells.includes('単価種類')) { const i = cells.findIndex(v => /^\d+$/.test(v)); cust = i >= 0 ? cells[i] : null; if (cust) out[cust] = out[cust] || {}; continue; }
+    if (cells.includes('商品コード') && cells.includes('販売価格')) { cCode = cells.indexOf('商品コード'); cTanka = cells.indexOf('単価'); continue; }
+    if (!cust || cCode < 0 || cTanka < 0) continue;
+    const code = cells[cCode], v = Number(r[cTanka]);
+    if (code && isFinite(v) && v > 0) { out[cust][code] = { price: v, note: '弥生販売の商品価格表' }; n++; }
+  }
+  return { map: out, count: n, custs: Object.keys(out) };
+}
+function combineIndiv(d) {
+  const all = Object.assign({}, d.indivSheet || {});
+  for (const k in (d.indivYayoi || {})) all[k] = d.indivYayoi[k];   // 弥生の価格表がある店は、そちらを優先
+  d.indiv = all;
+  d.indivCount = Object.values(all).reduce((a, m) => a + Object.keys(m).length, 0);
+}
 async function importFiles(files) {
   const found = {}; const names = [];
   for (const f of files) {
@@ -115,17 +135,23 @@ async function importFiles(files) {
     let used = false;
     for (const sn of wb.SheetNames) {
       const rows = rowsOf(wb.Sheets[sn]);
-      if (findHeader(rows, '得意先コード') >= 0 && !found.indiv) { found.indiv = parseIndiv(rows); used = true; }
+      if (findHeader(rows, '販売価格') >= 0 && findHeader(rows, '商品コード') >= 0) { const pl = parsePriceList(rows); found.plist = found.plist || { map: {}, count: 0, custs: [] }; Object.assign(found.plist.map, pl.map); found.plist.count += pl.count; found.plist.custs.push(...pl.custs); used = true; }
+      else if (findHeader(rows, '得意先コード') >= 0 && !found.indiv) { found.indiv = parseIndiv(rows); used = true; }
       else if (findHeader(rows, '単価種類') >= 0 && findHeader(rows, '取引区分') >= 0 && !found.customers) { found.customers = parseCustomers(rows); used = true; }
       else if (findHeader(rows, '税抜上代') >= 0 && !found.products) { found.products = parseProducts(rows); used = true; }
     }
     names.push(f.name + (used ? '' : '（読めませんでした）'));
   }
-  if (!found.customers && !found.products && !found.indiv) throw new Error('得意先台帳・商品台帳・個別価格表のどれとも判別できませんでした。弥生販売から書き出したExcelファイルか確認してください。');
+  if (!found.customers && !found.products && !found.indiv && !found.plist) throw new Error('得意先台帳・商品台帳・個別価格表のどれとも判別できませんでした。弥生販売から書き出したExcelファイルか確認してください。');
   const next = Object.assign({ customers: [], products: [], indiv: {}, indivCount: 0 }, DB || {});
-  if (found.customers) next.customers = found.customers;
-  if (found.products) next.products = found.products;
-  if (found.indiv) { next.indiv = found.indiv.map; next.indivCount = found.indiv.count; }
+  // 一部だけ書き出したファイルでも消えないよう、コードが同じものは置き換え、新しいものは追加する
+  const merge = (old, add) => { const m = new Map((old || []).map(x => [x.code, x])); add.forEach(x => m.set(x.code, x)); return [...m.values()]; };
+  if (found.customers) next.customers = merge(next.customers, found.customers);
+  if (found.products) next.products = merge(next.products, found.products);
+  if (!next.indivSheet && !next.indivYayoi) next.indivSheet = next.indiv || {};   // 以前の版からの引き継ぎ
+  if (found.indiv) next.indivSheet = found.indiv.map;
+  if (found.plist) next.indivYayoi = Object.assign({}, next.indivYayoi || {}, found.plist.map);
+  combineIndiv(next);
   next.importedAt = new Date().toISOString();
   next.files = names;
   if (!store.set('nh.data', next)) throw new Error('端末に保存できませんでした。ブラウザの保存領域を確認してください。');
@@ -251,7 +277,7 @@ function renderDetail() {
       ${c.addr || c.tel ? `<div class="info" style="margin-top:6px">${esc(c.addr)}${c.tel ? '　TEL ' + esc(c.tel) : ''}</div>` : ''}
     </div>`;
   if (c.memo) h += `<div class="note">${esc(c.memo)}</div>`;
-  const indKeys = Object.keys(indiv);
+  const indKeys = Object.keys(indiv).filter(k => { const p = prodByCode(k); return !p || p.show; });
   if (indKeys.length) {
     h += `<div class="box"><h2>この店だけの価格（税抜）</h2>` + indKeys.map(k => {
       const p = prodByCode(k);
@@ -461,9 +487,10 @@ $('#ov').addEventListener('change', async e => {
   try {
     const f = await importFiles([...e.target.files]);
     const parts = [];
-    if (f.customers) parts.push(`得意先 ${f.customers.filter(c => c.show).length}件`);
-    if (f.products) parts.push(`商品 ${f.products.filter(p => p.show).length}件`);
+    if (f.customers) parts.push(`得意先 ${f.customers.length}件を更新${f.customers.length <= 5 ? '（' + f.customers.map(c => c.name).join('・') + '）' : ''}`);
+    if (f.products) parts.push(`商品 ${f.products.length}件を更新`);
     if (f.indiv) parts.push(`個別価格 ${f.indiv.count}件`);
+    if (f.plist) parts.push(`弥生の商品価格表 ${f.plist.custs.map(k => (custByCode(k) || { name: '得意先 ' + k }).name).join('・')}（${f.plist.count}件）`);
     UI.msg = { text: '読み込みました：' + parts.join('、') };
   } catch (err) { UI.msg = { err: true, text: err.message || String(err) }; }
   render();
